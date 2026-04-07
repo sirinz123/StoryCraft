@@ -7,8 +7,9 @@ let db = try Database.setup()
 let router = Router()
 
 func lireFormulaire(_ request: Request) async throws -> [String: String] {
-    let buffer = try await request.body.collect(upTo: 1024 * 128)
-    let bodyString = String(buffer: buffer).replacingOccurrences(of: "+", with: "%20")
+    let buffer = try await request.body.collect(upTo: 1024 * 1024 * 8)
+    let bodyString = String(decoding: buffer.readableBytesView, as: UTF8.self)
+        .replacingOccurrences(of: "+", with: "%20")
 
     var components = URLComponents()
     components.percentEncodedQuery = bodyString
@@ -29,7 +30,7 @@ func lireCookie(_ request: Request, nom: String) -> String? {
     let parties = cookieHeader.split(separator: ";")
 
     for partie in parties {
-        let propre = String(partie).trimmingCharacters(in: CharacterSet.whitespaces)
+        let propre = String(partie).trimmingCharacters(in: .whitespaces)
         let elements = propre.split(separator: "=", maxSplits: 1)
 
         if elements.count == 2 && String(elements[0]) == nom {
@@ -58,6 +59,14 @@ func reponseRedirect(_ path: String, cookie: String? = nil) -> Response {
     return Response(status: .seeOther, headers: headers)
 }
 
+func reponseHTML(_ html: HTML, status: HTTPResponse.Status = .ok) -> Response {
+    Response(
+        status: status,
+        headers: [.contentType: "text/html; charset=utf-8"],
+        body: .init(byteBuffer: .init(string: html.content))
+    )
+}
+
 func cookieSession(_ token: String) -> String {
     "storycraft_session=\(token); Path=/; HttpOnly; SameSite=Lax"
 }
@@ -75,36 +84,31 @@ func pageErreurAuth() -> HTML {
 }
 
 func verifierAuteur(histoire: Histoire, utilisateur: Utilisateur?) -> Bool {
-    guard let utilisateur, let userId = utilisateur.id else { return false }
+    guard let utilisateur, let userId = utilisateur.id else {
+        return false
+    }
+
     return histoire.auteurId == userId
 }
 
-// PAGE D'ENTRÉE = AUTH
+// MARK: - PAGE D'ENTRÉE
+
 router.get("/") { request, _ -> Response in
     if (try utilisateurConnecte(request)) != nil {
         return reponseRedirect("/dashboard")
     }
 
-    let html = Views.pageAuthAccueil()
-    return Response(
-        status: .ok,
-        headers: [.contentType: "text/html; charset=utf-8"],
-        body: .init(byteBuffer: .init(string: html.content))
-    )
+    return reponseHTML(Views.pageAuthAccueil())
 }
 
-// REGISTER
+// MARK: - REGISTER
+
 router.get("/register") { request, _ -> Response in
     if (try utilisateurConnecte(request)) != nil {
         return reponseRedirect("/dashboard")
     }
 
-    let html = Views.pageRegister()
-    return Response(
-        status: .ok,
-        headers: [.contentType: "text/html; charset=utf-8"],
-        body: .init(byteBuffer: .init(string: html.content))
-    )
+    return reponseHTML(Views.pageRegister())
 }
 
 router.post("/register") { request, _ -> Response in
@@ -119,30 +123,20 @@ router.post("/register") { request, _ -> Response in
     }
 
     guard verifierLongueurMotDePasse(motDePasse) else {
-        let html = Views.pageRegister(
-            messageErreur: "Le mot de passe doit faire au moins 6 caractères.")
-        return Response(
-            status: .ok,
-            headers: [.contentType: "text/html; charset=utf-8"],
-            body: .init(byteBuffer: .init(string: html.content))
+        return reponseHTML(
+            Views.pageRegister(messageErreur: "Le mot de passe doit faire au moins 6 caractères.")
         )
     }
 
     if try Database.recupererUtilisateurParPseudo(db: db, pseudoRecherche: pseudo) != nil {
-        let html = Views.pageRegister(messageErreur: "Ce pseudo est déjà utilisé.")
-        return Response(
-            status: .ok,
-            headers: [.contentType: "text/html; charset=utf-8"],
-            body: .init(byteBuffer: .init(string: html.content))
+        return reponseHTML(
+            Views.pageRegister(messageErreur: "Ce pseudo est déjà utilisé.")
         )
     }
 
     if try Database.recupererUtilisateurParEmail(db: db, emailRecherche: email) != nil {
-        let html = Views.pageRegister(messageErreur: "Cet email est déjà utilisé.")
-        return Response(
-            status: .ok,
-            headers: [.contentType: "text/html; charset=utf-8"],
-            body: .init(byteBuffer: .init(string: html.content))
+        return reponseHTML(
+            Views.pageRegister(messageErreur: "Cet email est déjà utilisé.")
         )
     }
 
@@ -153,29 +147,31 @@ router.post("/register") { request, _ -> Response in
         motDePasse: motDePasse
     )
 
-    let utilisateur = try Database.recupererUtilisateurParEmail(db: db, emailRecherche: email)!
-    let token = try Database.creerSession(db: db, utilisateurId: utilisateur.id!)
+    guard
+        let utilisateur = try Database.recupererUtilisateurParEmail(db: db, emailRecherche: email),
+        let utilisateurId = utilisateur.id
+    else {
+        return Response(status: .internalServerError)
+    }
+
+    let token = try Database.creerSession(db: db, utilisateurId: utilisateurId)
     return reponseRedirect("/dashboard", cookie: cookieSession(token))
 }
 
-// LOGIN
+// MARK: - LOGIN
+
 router.get("/login") { request, _ -> Response in
     if (try utilisateurConnecte(request)) != nil {
         return reponseRedirect("/dashboard")
     }
 
-    let html = Views.pageAuthAccueil()
-    return Response(
-        status: .ok,
-        headers: [.contentType: "text/html; charset=utf-8"],
-        body: .init(byteBuffer: .init(string: html.content))
-    )
+    return reponseHTML(Views.pageAuthAccueil())
 }
 
 router.post("/login") { request, _ -> Response in
     let form = try await lireFormulaire(request)
 
-    let email = form["email"] ?? ""
+    let email = (form["email"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let motDePasse = form["motDePasse"] ?? ""
 
     guard
@@ -183,21 +179,20 @@ router.post("/login") { request, _ -> Response in
             db: db,
             email: email,
             motDePasse: motDePasse
-        )
+        ),
+        let utilisateurId = utilisateur.id
     else {
-        let html = Views.pageAuthAccueil(messageErreur: "Email ou mot de passe incorrect.")
-        return Response(
-            status: .ok,
-            headers: [.contentType: "text/html; charset=utf-8"],
-            body: .init(byteBuffer: .init(string: html.content))
+        return reponseHTML(
+            Views.pageAuthAccueil(messageErreur: "Email ou mot de passe incorrect.")
         )
     }
 
-    let token = try Database.creerSession(db: db, utilisateurId: utilisateur.id!)
+    let token = try Database.creerSession(db: db, utilisateurId: utilisateurId)
     return reponseRedirect("/dashboard", cookie: cookieSession(token))
 }
 
-// LOGOUT
+// MARK: - LOGOUT
+
 router.post("/logout") { request, _ -> Response in
     if let token = lireCookie(request, nom: "storycraft_session") {
         try? Database.supprimerSession(db: db, token: token)
@@ -206,15 +201,18 @@ router.post("/logout") { request, _ -> Response in
     return reponseRedirect("/", cookie: cookieSuppressionSession())
 }
 
-// DASHBOARD
+// MARK: - DASHBOARD
+
 router.get("/dashboard") { request, _ -> HTML in
-    guard let utilisateur = try utilisateurConnecte(request) else {
+    guard let utilisateur = try utilisateurConnecte(request),
+        let utilisateurId = utilisateur.id
+    else {
         return pageErreurAuth()
     }
 
     let histoires = try Database.recupererHistoiresParAuteur(
         db: db,
-        auteurIdRecherche: utilisateur.id!
+        auteurIdRecherche: utilisateurId
     )
 
     let brouillons = histoires.filter { $0.statut == "brouillon" }
@@ -227,7 +225,8 @@ router.get("/dashboard") { request, _ -> HTML in
     )
 }
 
-// PROFIL
+// MARK: - PROFIL
+
 router.get("/profil") { request, _ -> HTML in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return pageErreurAuth()
@@ -237,7 +236,9 @@ router.get("/profil") { request, _ -> HTML in
 }
 
 router.post("/profil/update") { request, _ -> Response in
-    guard let utilisateur = try utilisateurConnecte(request) else {
+    guard let utilisateur = try utilisateurConnecte(request),
+        let utilisateurId = utilisateur.id
+    else {
         return Response(status: .unauthorized)
     }
 
@@ -259,7 +260,7 @@ router.post("/profil/update") { request, _ -> Response in
 
     try Database.mettreAJourProfil(
         db: db,
-        utilisateurIdRecherche: utilisateur.id!,
+        utilisateurIdRecherche: utilisateurId,
         pseudoNouveau: pseudo,
         bioNouvelle: bio,
         avatarURLNouvelle: avatarURL
@@ -268,14 +269,16 @@ router.post("/profil/update") { request, _ -> Response in
     return reponseRedirect("/profil")
 }
 
-// EXPLORER
+// MARK: - EXPLORER
+
 router.get("/histoires/publiees") { request, _ -> HTML in
     let utilisateur = try utilisateurConnecte(request)
     let histoires = try Database.recupererHistoiresPubliees(db: db)
     return Views.pageHistoiresPubliees(histoires: histoires, utilisateur: utilisateur)
 }
 
-// DETAIL HISTOIRE
+// MARK: - DETAIL HISTOIRE
+
 router.get("/histoires/:id") { request, context -> HTML in
     let utilisateur = try utilisateurConnecte(request)
 
@@ -296,6 +299,7 @@ router.get("/histoires/:id") { request, context -> HTML in
     }
 
     let chapitres = try Database.recupererChapitresParHistoire(db: db, histoireIdRecherche: id)
+
     let chapitresAvecStats = try chapitres.map { chapitre in
         let stats = try Database.statistiquesChapitre(
             db: db,
@@ -322,18 +326,66 @@ router.get("/histoires/:id") { request, context -> HTML in
     )
 }
 
-// AJOUT HISTOIRE
+// MARK: - PAGE LECTURE CHAPITRE
+
+router.get("/chapitres/:id") { request, context -> HTML in
+    let utilisateur = try utilisateurConnecte(request)
+
+    guard let idString = context.parameters.get("id"),
+        let id = Int64(idString),
+        let chapitre = try Database.recupererChapitreParId(db: db, chapitreIdRecherche: id),
+        let histoire = try Database.recupererHistoireParId(
+            db: db, histoireIdRecherche: chapitre.histoireId),
+        let auteur = try Database.recupererUtilisateurParId(db: db, idRecherche: histoire.auteurId)
+    else {
+        return Views.pageErreur(utilisateur: utilisateur)
+    }
+
+    if histoire.statut != "publie" && !verifierAuteur(histoire: histoire, utilisateur: utilisateur)
+    {
+        return Views.pageErreur(
+            message: "Ce chapitre n’est pas accessible.",
+            utilisateur: utilisateur
+        )
+    }
+
+    let chapitrePrecedent = try Database.recupererChapitrePrecedent(
+        db: db,
+        histoireIdRecherche: chapitre.histoireId,
+        numeroActuel: chapitre.numero
+    )
+
+    let chapitreSuivant = try Database.recupererChapitreSuivant(
+        db: db,
+        histoireIdRecherche: chapitre.histoireId,
+        numeroActuel: chapitre.numero
+    )
+
+    return Views.pageLectureChapitre(
+        histoire: histoire,
+        auteur: auteur,
+        chapitre: chapitre,
+        chapitrePrecedent: chapitrePrecedent,
+        chapitreSuivant: chapitreSuivant,
+        utilisateur: utilisateur
+    )
+}
+
+// MARK: - AJOUT HISTOIRE
+
 router.post("/histoires/ajouter") { request, _ -> Response in
-    guard let utilisateur = try utilisateurConnecte(request) else {
+    guard let utilisateur = try utilisateurConnecte(request),
+        let utilisateurId = utilisateur.id
+    else {
         return Response(status: .unauthorized)
     }
 
     let form = try await lireFormulaire(request)
-    let titre = form["titre"] ?? ""
-    let genre = form["genre"] ?? ""
-    let resume = form["resume"] ?? ""
-    let couverture = form["couverture"] ?? ""
-    let statut = form["statut"] ?? "brouillon"
+    let titre = (form["titre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let genre = (form["genre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let resume = (form["resume"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let couverture = (form["couverture"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let statut = (form["statut"] ?? "brouillon").trimmingCharacters(in: .whitespacesAndNewlines)
 
     guard !titre.isEmpty, !genre.isEmpty, !resume.isEmpty else {
         return Response(status: .badRequest)
@@ -341,7 +393,7 @@ router.post("/histoires/ajouter") { request, _ -> Response in
 
     try Database.ajouterHistoire(
         db: db,
-        auteurId: utilisateur.id!,
+        auteurId: utilisateurId,
         titre: titre,
         genre: genre,
         resume: resume,
@@ -352,7 +404,8 @@ router.post("/histoires/ajouter") { request, _ -> Response in
     return reponseRedirect("/dashboard")
 }
 
-// PAGE MODIF HISTOIRE
+// MARK: - PAGE MODIF HISTOIRE
+
 router.get("/histoires/:id/modifier") { request, context -> HTML in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return pageErreurAuth()
@@ -369,7 +422,8 @@ router.get("/histoires/:id/modifier") { request, context -> HTML in
     return Views.pageModificationHistoire(histoire: histoire, utilisateur: utilisateur)
 }
 
-// ACTION MODIF HISTOIRE
+// MARK: - ACTION MODIF HISTOIRE
+
 router.post("/histoires/:id/update") { request, context -> Response in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return Response(status: .unauthorized)
@@ -384,11 +438,11 @@ router.post("/histoires/:id/update") { request, context -> Response in
     }
 
     let form = try await lireFormulaire(request)
-    let titre = form["titre"] ?? ""
-    let genre = form["genre"] ?? ""
-    let resume = form["resume"] ?? ""
-    let couverture = form["couverture"] ?? ""
-    let statut = form["statut"] ?? "brouillon"
+    let titre = (form["titre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let genre = (form["genre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let resume = (form["resume"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let couverture = (form["couverture"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let statut = (form["statut"] ?? "brouillon").trimmingCharacters(in: .whitespacesAndNewlines)
 
     guard !titre.isEmpty, !genre.isEmpty, !resume.isEmpty else {
         return Response(status: .badRequest)
@@ -396,7 +450,7 @@ router.post("/histoires/:id/update") { request, context -> Response in
 
     try Database.modifierHistoire(
         db: db,
-        histoireIdRecherche: histoire.id!,
+        histoireIdRecherche: histoire.id ?? id,
         titre: titre,
         genre: genre,
         resume: resume,
@@ -407,7 +461,8 @@ router.post("/histoires/:id/update") { request, context -> Response in
     return reponseRedirect("/dashboard")
 }
 
-// SUPPR HISTOIRE
+// MARK: - SUPPR HISTOIRE
+
 router.post("/histoires/:id/supprimer") { request, context -> Response in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return Response(status: .unauthorized)
@@ -416,16 +471,18 @@ router.post("/histoires/:id/supprimer") { request, context -> Response in
     guard let idString = context.parameters.get("id"),
         let id = Int64(idString),
         let histoire = try Database.recupererHistoireParId(db: db, histoireIdRecherche: id),
-        verifierAuteur(histoire: histoire, utilisateur: utilisateur)
+        verifierAuteur(histoire: histoire, utilisateur: utilisateur),
+        let histoireId = histoire.id
     else {
         return Response(status: .badRequest)
     }
 
-    try Database.supprimerHistoire(db: db, histoireIdRecherche: histoire.id!)
+    try Database.supprimerHistoire(db: db, histoireIdRecherche: histoireId)
     return reponseRedirect("/dashboard")
 }
 
-// GESTION CHAPITRES
+// MARK: - GESTION CHAPITRES
+
 router.get("/histoires/:id/chapitres") { request, context -> HTML in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return pageErreurAuth()
@@ -440,6 +497,7 @@ router.get("/histoires/:id/chapitres") { request, context -> HTML in
     }
 
     let chapitres = try Database.recupererChapitresParHistoire(db: db, histoireIdRecherche: id)
+
     return Views.pageGestionChapitres(
         histoire: histoire,
         chapitres: chapitres,
@@ -447,7 +505,8 @@ router.get("/histoires/:id/chapitres") { request, context -> HTML in
     )
 }
 
-// AJOUT CHAPITRE
+// MARK: - AJOUT CHAPITRE
+
 router.post("/histoires/:id/chapitres/ajouter") { request, context -> Response in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return Response(status: .unauthorized)
@@ -462,8 +521,8 @@ router.post("/histoires/:id/chapitres/ajouter") { request, context -> Response i
     }
 
     let form = try await lireFormulaire(request)
-    let titre = form["titre"] ?? ""
-    let contenu = form["contenu"] ?? ""
+    let titre = (form["titre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let contenu = (form["contenu"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
     guard !titre.isEmpty, !contenu.isEmpty else {
         return Response(status: .badRequest)
@@ -482,7 +541,8 @@ router.post("/histoires/:id/chapitres/ajouter") { request, context -> Response i
     return reponseRedirect("/histoires/\(id)/chapitres")
 }
 
-// PAGE MODIF CHAPITRE
+// MARK: - PAGE MODIF CHAPITRE
+
 router.get("/chapitres/:id/modifier") { request, context -> HTML in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return pageErreurAuth()
@@ -501,7 +561,8 @@ router.get("/chapitres/:id/modifier") { request, context -> HTML in
     return Views.pageModificationChapitre(chapitre: chapitre, utilisateur: utilisateur)
 }
 
-// ACTION MODIF CHAPITRE
+// MARK: - ACTION MODIF CHAPITRE
+
 router.post("/chapitres/:id/update") { request, context -> Response in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return Response(status: .unauthorized)
@@ -518,8 +579,8 @@ router.post("/chapitres/:id/update") { request, context -> Response in
     }
 
     let form = try await lireFormulaire(request)
-    let titre = form["titre"] ?? ""
-    let contenu = form["contenu"] ?? ""
+    let titre = (form["titre"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let contenu = (form["contenu"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let numero = Int(form["numero"] ?? "") ?? chapitre.numero
 
     guard !titre.isEmpty, !contenu.isEmpty else {
@@ -537,7 +598,8 @@ router.post("/chapitres/:id/update") { request, context -> Response in
     return reponseRedirect("/histoires/\(chapitre.histoireId)/chapitres")
 }
 
-// SUPPR CHAPITRE
+// MARK: - SUPPR CHAPITRE
+
 router.post("/chapitres/:id/supprimer") { request, context -> Response in
     guard let utilisateur = try utilisateurConnecte(request) else {
         return Response(status: .unauthorized)
@@ -557,9 +619,12 @@ router.post("/chapitres/:id/supprimer") { request, context -> Response in
     return reponseRedirect("/histoires/\(chapitre.histoireId)/chapitres")
 }
 
-// NOTER CHAPITRE
+// MARK: - NOTER CHAPITRE
+
 router.post("/chapitres/:id/noter") { request, context -> Response in
-    guard let utilisateur = try utilisateurConnecte(request) else {
+    guard let utilisateur = try utilisateurConnecte(request),
+        let utilisateurId = utilisateur.id
+    else {
         return Response(status: .unauthorized)
     }
 
@@ -578,7 +643,7 @@ router.post("/chapitres/:id/noter") { request, context -> Response in
 
     try Database.noterChapitre(
         db: db,
-        utilisateurId: utilisateur.id!,
+        utilisateurId: utilisateurId,
         chapitreId: chapitreId,
         note: note
     )
@@ -590,9 +655,12 @@ router.post("/chapitres/:id/noter") { request, context -> Response in
     return reponseRedirect("/")
 }
 
-// COMMENTAIRE HISTOIRE
+// MARK: - COMMENTAIRE HISTOIRE
+
 router.post("/histoires/:id/commentaires/ajouter") { request, context -> Response in
-    guard let utilisateur = try utilisateurConnecte(request) else {
+    guard let utilisateur = try utilisateurConnecte(request),
+        let utilisateurId = utilisateur.id
+    else {
         return Response(status: .unauthorized)
     }
 
@@ -612,7 +680,7 @@ router.post("/histoires/:id/commentaires/ajouter") { request, context -> Respons
     try Database.ajouterCommentaireHistoire(
         db: db,
         histoireId: histoireId,
-        utilisateurId: utilisateur.id!,
+        utilisateurId: utilisateurId,
         contenu: contenu
     )
 

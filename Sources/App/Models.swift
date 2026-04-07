@@ -87,3 +87,10 @@ struct ChapitreAvecStats: Codable, Sendable {
     var nombreNotes: Int
     var maNote: Int?
 }
+
+struct FichierUpload: Sendable {
+    var nomChamp: String
+    var nomOriginal: String
+    var typeMime: String
+    var donnees: Data
+}

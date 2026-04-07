@@ -11,6 +11,9 @@ struct Database {
     static let chapitres = Table("chapitres")
     static let notesChapitres = Table("notes_chapitres")
     static let commentairesHistoires = Table("commentaires_histoires")
+    static let likesHistoires = Table("likes_histoires")
+    static let favorisHistoires = Table("favoris_histoires")
+    static let vuesHistoires = Table("vues_histoires")
 
     // UTILISATEURS
     static let utilisateurId = Expression<Int64>("id")
@@ -62,6 +65,21 @@ struct Database {
     static let commentaireUtilisateurId = Expression<Int64>("utilisateur_id")
     static let commentaireContenu = Expression<String>("contenu")
     static let commentaireDateCreation = Expression<String>("date_creation")
+
+    // LIKES
+    static let likeId = Expression<Int64>("id")
+    static let likeUtilisateurId = Expression<Int64>("utilisateur_id")
+    static let likeHistoireId = Expression<Int64>("histoire_id")
+
+    // FAVORIS
+    static let favoriId = Expression<Int64>("id")
+    static let favoriUtilisateurId = Expression<Int64>("utilisateur_id")
+    static let favoriHistoireId = Expression<Int64>("histoire_id")
+
+    // VUES
+    static let vueId = Expression<Int64>("id")
+    static let vueHistoireId = Expression<Int64>("histoire_id")
+    static let vueDate = Expression<String>("date")
 
     static func setup() throws -> Connection {
         let db = try Connection("db.sqlite3")
@@ -129,6 +147,29 @@ struct Database {
                 t.column(commentaireUtilisateurId)
                 t.column(commentaireContenu)
                 t.column(commentaireDateCreation)
+            })
+
+        try db.run(
+            likesHistoires.create(ifNotExists: true) { t in
+                t.column(likeId, primaryKey: .autoincrement)
+                t.column(likeUtilisateurId)
+                t.column(likeHistoireId)
+                t.unique(likeUtilisateurId, likeHistoireId)
+            })
+
+        try db.run(
+            favorisHistoires.create(ifNotExists: true) { t in
+                t.column(favoriId, primaryKey: .autoincrement)
+                t.column(favoriUtilisateurId)
+                t.column(favoriHistoireId)
+                t.unique(favoriUtilisateurId, favoriHistoireId)
+            })
+
+        try db.run(
+            vuesHistoires.create(ifNotExists: true) { t in
+                t.column(vueId, primaryKey: .autoincrement)
+                t.column(vueHistoireId)
+                t.column(vueDate)
             })
 
         return db
@@ -431,10 +472,26 @@ struct Database {
         histoireIdRecherche: Int64
     ) throws {
         try db.run(
-            commentairesHistoires.filter(commentaireHistoireId == histoireIdRecherche).delete())
+            commentairesHistoires.filter(commentaireHistoireId == histoireIdRecherche).delete()
+        )
+
+        try db.run(
+            likesHistoires.filter(likeHistoireId == histoireIdRecherche).delete()
+        )
+
+        try db.run(
+            favorisHistoires.filter(favoriHistoireId == histoireIdRecherche).delete()
+        )
+
+        try db.run(
+            vuesHistoires.filter(vueHistoireId == histoireIdRecherche).delete()
+        )
 
         let chapitresHistoire = try recupererChapitresParHistoire(
-            db: db, histoireIdRecherche: histoireIdRecherche)
+            db: db,
+            histoireIdRecherche: histoireIdRecherche
+        )
+
         for chapitre in chapitresHistoire {
             try db.run(notesChapitres.filter(noteChapitreId == chapitre.id ?? -1).delete())
         }
@@ -443,7 +500,81 @@ struct Database {
         try db.run(histoires.filter(histoireId == histoireIdRecherche).delete())
     }
 
+    static func recupererFavorisParUtilisateur(
+        db: Connection,
+        utilisateurIdRecherche: Int64
+    ) throws -> [HistoirePublique] {
+        let query =
+            favorisHistoires
+            .join(histoires, on: favorisHistoires[favoriHistoireId] == histoires[histoireId])
+            .join(utilisateurs, on: histoires[auteurId] == utilisateurs[utilisateurId])
+            .filter(favorisHistoires[favoriUtilisateurId] == utilisateurIdRecherche)
+            .order(histoires[histoireDateModification].desc)
+
+        return try db.prepare(query).map { row in
+            HistoirePublique(
+                id: row[histoires[histoireId]],
+                auteurId: row[histoires[auteurId]],
+                pseudoAuteur: row[utilisateurs[pseudo]],
+                avatarAuteur: row[utilisateurs[avatarURL]],
+                titre: row[histoires[titre]],
+                genre: row[histoires[genre]],
+                resume: row[histoires[resume]],
+                couverture: row[histoires[couverture]],
+                statut: row[histoires[statut]],
+                dateCreation: row[histoires[histoireDateCreation]],
+                dateModification: row[histoires[histoireDateModification]]
+            )
+        }
+    }
+
     // MARK: - CHAPITRES
+
+    static func recupererChapitrePrecedent(
+        db: Connection,
+        histoireIdRecherche: Int64,
+        numeroActuel: Int
+    ) throws -> Chapitre? {
+        let query =
+            chapitres
+            .filter(chapitreHistoireId == histoireIdRecherche && numero < numeroActuel)
+            .order(numero.desc)
+
+        guard let row = try db.pluck(query) else { return nil }
+
+        return Chapitre(
+            id: row[chapitreId],
+            histoireId: row[chapitreHistoireId],
+            numero: row[numero],
+            titre: row[chapitreTitre],
+            contenu: row[contenu],
+            dateCreation: row[chapitreDateCreation],
+            dateModification: row[chapitreDateModification]
+        )
+    }
+
+    static func recupererChapitreSuivant(
+        db: Connection,
+        histoireIdRecherche: Int64,
+        numeroActuel: Int
+    ) throws -> Chapitre? {
+        let query =
+            chapitres
+            .filter(chapitreHistoireId == histoireIdRecherche && numero > numeroActuel)
+            .order(numero.asc)
+
+        guard let row = try db.pluck(query) else { return nil }
+
+        return Chapitre(
+            id: row[chapitreId],
+            histoireId: row[chapitreHistoireId],
+            numero: row[numero],
+            titre: row[chapitreTitre],
+            contenu: row[contenu],
+            dateCreation: row[chapitreDateCreation],
+            dateModification: row[chapitreDateModification]
+        )
+    }
 
     static func ajouterChapitre(
         db: Connection,
@@ -463,6 +594,12 @@ struct Database {
                 chapitreDateCreation <- now,
                 chapitreDateModification <- now
             ))
+
+        try db.run(
+            histoires
+                .filter(self.histoireId == histoireId)
+                .update(histoireDateModification <- now)
+        )
     }
 
     static func recupererChapitresParHistoire(
@@ -514,22 +651,42 @@ struct Database {
         contenu: String
     ) throws {
         let query = chapitres.filter(chapitreId == chapitreIdRecherche)
+        let now = dateActuelle()
 
         try db.run(
             query.update(
                 self.numero <- numero,
                 chapitreTitre <- titre,
                 self.contenu <- contenu,
-                chapitreDateModification <- dateActuelle()
+                chapitreDateModification <- now
             ))
+
+        if let chapitre = try recupererChapitreParId(
+            db: db, chapitreIdRecherche: chapitreIdRecherche)
+        {
+            try db.run(
+                histoires
+                    .filter(histoireId == chapitre.histoireId)
+                    .update(histoireDateModification <- now)
+            )
+        }
     }
 
     static func supprimerChapitre(
         db: Connection,
         chapitreIdRecherche: Int64
     ) throws {
-        try db.run(notesChapitres.filter(noteChapitreId == chapitreIdRecherche).delete())
-        try db.run(chapitres.filter(chapitreId == chapitreIdRecherche).delete())
+        if let chapitre = try recupererChapitreParId(
+            db: db, chapitreIdRecherche: chapitreIdRecherche)
+        {
+            try db.run(notesChapitres.filter(noteChapitreId == chapitreIdRecherche).delete())
+            try db.run(chapitres.filter(chapitreId == chapitreIdRecherche).delete())
+            try db.run(
+                histoires
+                    .filter(histoireId == chapitre.histoireId)
+                    .update(histoireDateModification <- dateActuelle())
+            )
+        }
     }
 
     static func prochainNumeroChapitre(
@@ -643,5 +800,111 @@ struct Database {
                 dateCreation: row[commentairesHistoires[commentaireDateCreation]]
             )
         }
+    }
+
+    // MARK: - LIKES
+
+    static func toggleLike(
+        db: Connection,
+        utilisateurId: Int64,
+        histoireId: Int64
+    ) throws {
+        let query = likesHistoires.filter(
+            likeUtilisateurId == utilisateurId && likeHistoireId == histoireId
+        )
+
+        if try db.pluck(query) != nil {
+            try db.run(query.delete())
+        } else {
+            try db.run(
+                likesHistoires.insert(
+                    likeUtilisateurId <- utilisateurId,
+                    likeHistoireId <- histoireId
+                ))
+        }
+    }
+
+    static func nombreLikes(
+        db: Connection,
+        histoireId: Int64
+    ) throws -> Int {
+        try db.scalar(
+            likesHistoires.filter(likeHistoireId == histoireId).count
+        )
+    }
+
+    static func estLikeeParUtilisateur(
+        db: Connection,
+        utilisateurId: Int64,
+        histoireId: Int64
+    ) throws -> Bool {
+        let query = likesHistoires.filter(
+            likeUtilisateurId == utilisateurId && likeHistoireId == histoireId
+        )
+        return try db.pluck(query) != nil
+    }
+
+    // MARK: - FAVORIS
+
+    static func toggleFavori(
+        db: Connection,
+        utilisateurId: Int64,
+        histoireId: Int64
+    ) throws {
+        let query = favorisHistoires.filter(
+            favoriUtilisateurId == utilisateurId && favoriHistoireId == histoireId
+        )
+
+        if try db.pluck(query) != nil {
+            try db.run(query.delete())
+        } else {
+            try db.run(
+                favorisHistoires.insert(
+                    favoriUtilisateurId <- utilisateurId,
+                    favoriHistoireId <- histoireId
+                ))
+        }
+    }
+
+    static func nombreFavoris(
+        db: Connection,
+        histoireId: Int64
+    ) throws -> Int {
+        try db.scalar(
+            favorisHistoires.filter(favoriHistoireId == histoireId).count
+        )
+    }
+
+    static func estEnFavoriParUtilisateur(
+        db: Connection,
+        utilisateurId: Int64,
+        histoireId: Int64
+    ) throws -> Bool {
+        let query = favorisHistoires.filter(
+            favoriUtilisateurId == utilisateurId && favoriHistoireId == histoireId
+        )
+        return try db.pluck(query) != nil
+    }
+
+    // MARK: - VUES
+
+    static func ajouterVue(
+        db: Connection,
+        histoireId: Int64
+    ) throws {
+        try db.run(
+            vuesHistoires.insert(
+                vueHistoireId <- histoireId,
+                vueDate <- dateActuelle()
+            ))
+    }
+
+    static func nombreVues(
+        db: Connection,
+        histoireId: Int64
+    ) throws -> Int {
+        try db.scalar(
+            vuesHistoires.filter(vueHistoireId == histoireId).count
+        )
     }
 }
